@@ -1,0 +1,91 @@
+name: ShipBrain Notify
+
+on:
+  workflow_run:
+    workflows: ["ShipBrain CI", "ShipBrain Preview Deploy", "ShipBrain Production Deploy"]
+    types: [completed]
+    branches: [develop, main]
+
+jobs:
+  notify:
+    name: Notify ShipBrain
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send notification to ShipBrain
+        continue-on-error: true
+        env:
+          SHIPBRAIN_API_URL: ${{ secrets.SHIPBRAIN_API_URL }}
+          SHIPBRAIN_API_KEY: ${{ secrets.SHIPBRAIN_API_KEY }}
+        run: |
+          if [ -z "$SHIPBRAIN_API_URL" ] || [ -z "$SHIPBRAIN_API_KEY" ]; then
+            echo "ShipBrain secrets missing; notification skipped."
+            exit 0
+          fi
+          curl --fail-with-body -sS -X POST "$SHIPBRAIN_API_URL/api/ci/webhook" \
+            -H "Authorization: Bearer $SHIPBRAIN_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"repo\": \"$GITHUB_REPOSITORY\",
+              \"sha\": \"${{ github.event.workflow_run.head_sha }}\",
+              \"branch\": \"${{ github.event.workflow_run.head_branch }}\",
+              \"run_id\": \"${{ github.event.workflow_run.id }}\",
+              \"status\": \"${{ github.event.workflow_run.conclusion }}\",
+              \"workflow_name\": \"${{ github.event.workflow_run.name }}\",
+              \"run_url\": \"${{ github.event.workflow_run.html_url }}\"
+            }"
+
+  incident:
+    name: ShipBrain Incident Alert (on failure)
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'failure'
+    steps:
+      - name: Create ShipBrain incident
+        env:
+          SHIPBRAIN_API_URL: ${{ secrets.SHIPBRAIN_API_URL }}
+          SHIPBRAIN_API_KEY: ${{ secrets.SHIPBRAIN_API_KEY }}
+        run: |
+          if [ -z "$SHIPBRAIN_API_URL" ] || [ -z "$SHIPBRAIN_API_KEY" ]; then
+            echo "ShipBrain secrets missing; incident creation skipped."
+            exit 0
+          fi
+          # Use workflow name + branch as incidentId so auto-resolve can match it
+          WORKFLOW_KEY=$(echo "${{ github.event.workflow_run.name }}-${{ github.event.workflow_run.head_branch }}" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+          curl --fail-with-body -sS -X POST "$SHIPBRAIN_API_URL/api/webhooks/incidents" \
+            -H "Authorization: Bearer $SHIPBRAIN_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"source\": \"github-workflow\",
+              \"repo\": \"$GITHUB_REPOSITORY\",
+              \"title\": \"[${{ github.repository }}] ${{ github.event.workflow_run.name }} failed\",
+              \"severity\": \"high\",
+              \"service\": \"${{ github.event.workflow_run.name }}\",
+              \"environment\": \"production\",
+              \"logs\": \"Workflow: ${{ github.event.workflow_run.name }}\\nBranch: ${{ github.event.workflow_run.head_branch }}\\nCommit: ${{ github.event.workflow_run.head_sha }}\\nRun URL: ${{ github.event.workflow_run.html_url }}\\nActor: ${{ github.event.workflow_run.triggering_actor.login }}\",
+              \"branch\": \"${{ github.event.workflow_run.head_branch }}\",
+              \"commit\": \"${{ github.event.workflow_run.head_sha }}\",
+              \"incidentId\": \"github-workflow-$WORKFLOW_KEY\"
+            }"
+
+  auto-resolve:
+    name: Auto-resolve on success
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Notify ShipBrain of success (for auto-resolve)
+        env:
+          SHIPBRAIN_API_URL: ${{ secrets.SHIPBRAIN_API_URL }}
+          SHIPBRAIN_API_KEY: ${{ secrets.SHIPBRAIN_API_KEY }}
+        run: |
+          if [ -z "$SHIPBRAIN_API_URL" ] || [ -z "$SHIPBRAIN_API_KEY" ]; then
+            exit 0
+          fi
+          # Use same workflow name + branch pattern to match incident
+          WORKFLOW_KEY=$(echo "${{ github.event.workflow_run.name }}-${{ github.event.workflow_run.head_branch }}" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+          curl --fail-with-body -sS -X POST "$SHIPBRAIN_API_URL/api/webhooks/incidents/resolve" \
+            -H "Authorization: Bearer $SHIPBRAIN_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"repo\": \"$GITHUB_REPOSITORY\",
+              \"incidentId\": \"github-workflow-$WORKFLOW_KEY\",
+              \"resolution\": \"Workflow succeeded on retry\"
+            }"
