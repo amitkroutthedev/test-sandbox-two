@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "public": true,
+  "routes": [
+    { "src": "/api/release", "dest": "/api/release.js" },
+    { "src": "/api/trigger-incident", "dest": "/api/trigger-incident.js" },
+    { "src": "/(.*)", "dest": "/index.html" }
+  ]
+}

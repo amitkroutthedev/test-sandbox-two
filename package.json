@@ -1,0 +1,14 @@
+{
+  "name": "shipbrain-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "build": "node build.mjs",
+    "test": "echo 'No tests configured' && exit 0",
+    "vercel:pull": "vercel pull --yes --environment=production",
+    "vercel:build": "vercel build --prod",
+    "vercel:deploy:prod": "vercel deploy --prebuilt --prod"
+  }
+}
