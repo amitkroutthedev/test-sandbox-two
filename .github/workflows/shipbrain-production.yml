@@ -1,0 +1,126 @@
+name: ShipBrain Production Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag (e.g., release-v2024.01.15-1430)
+        required: true
+        type: string
+      release_sha:
+        description: Merge commit SHA for the release
+        required: true
+        type: string
+      is_hotfix:
+        description: Is this a hotfix deployment?
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: shipbrain-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      SHIPBRAIN_RELEASE_TAG: ${{ inputs.release_tag }}
+      SHIPBRAIN_RELEASE_SHA: ${{ inputs.release_sha }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Verify release SHA
+        run: |
+          echo "::group::Verifying release SHA"
+          ACTUAL=$(git rev-parse HEAD)
+          EXPECTED="$SHIPBRAIN_RELEASE_SHA"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::SHA mismatch - deploy blocked"
+            echo "Expected : $EXPECTED"
+            echo "Actual   : $ACTUAL"
+            exit 1
+          fi
+          echo "SHA verified: $SHIPBRAIN_RELEASE_SHA"
+          echo "::endgroup::"
+          echo ""
+          echo "=========================================="
+          echo "Deploying release: $SHIPBRAIN_RELEASE_TAG"
+          echo "=========================================="
+
+      - name: Install dependencies
+        run: |
+          echo "::group::Installing dependencies"
+          npm ci
+          echo "::endgroup::"
+
+      - name: Build application
+        run: |
+          echo "::group::Running production build"
+          npm run build
+          echo "::endgroup::"
+          echo "Build completed successfully"
+
+      - name: Install Wrangler
+        run: npm install -g wrangler
+
+      - name: Deploy to Cloudflare Pages Production
+        id: deploy
+        run: |
+          echo "::group::Deploying to Cloudflare Pages Production"
+          DEPLOY_OUTPUT=$(mktemp)
+          wrangler pages deploy dist \
+            --project-name="${{ secrets.CF_PROJECT_NAME }}" \
+            --branch="main" \
+            --commit-hash="$SHIPBRAIN_RELEASE_SHA" | tee "$DEPLOY_OUTPUT"
+          echo "::endgroup::"
+
+          # Extract deployment URL from output
+          DEPLOY_URL=$(grep -oE 'https://[a-zA-Z0-9._-]+\.pages\.dev' "$DEPLOY_OUTPUT" | tail -1)
+          echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+          echo ""
+          echo "=========================================="
+          echo "Production deployed: $DEPLOY_URL"
+          echo "Tag: $SHIPBRAIN_RELEASE_TAG"
+          echo "=========================================="
+
+      - name: Notify ShipBrain
+        if: always()
+        continue-on-error: true
+        env:
+          SHIPBRAIN_API_URL: ${{ secrets.SHIPBRAIN_API_URL }}
+          SHIPBRAIN_API_KEY: ${{ secrets.SHIPBRAIN_API_KEY }}
+        run: |
+          if [ -z "$SHIPBRAIN_API_URL" ] || [ -z "$SHIPBRAIN_API_KEY" ]; then
+            echo "ShipBrain secrets missing; notification skipped."
+            exit 0
+          fi
+          curl --fail-with-body -sS -X POST "$SHIPBRAIN_API_URL/api/deployments/result" \
+            -H "Authorization: Bearer $SHIPBRAIN_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"repo\": \"$GITHUB_REPOSITORY\",
+              \"tag\": \"$SHIPBRAIN_RELEASE_TAG\",
+              \"sha\": \"$SHIPBRAIN_RELEASE_SHA\",
+              \"status\": \"${{ job.status }}\",
+              \"is_hotfix\": \"${{ inputs.is_hotfix }}\",
+              \"deploy_url\": \"${{ steps.deploy.outputs.url }}\",
+              \"run_url\": \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"
+            }"
