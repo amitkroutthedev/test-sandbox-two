@@ -1,0 +1,98 @@
+name: ShipBrain Preview Deploy
+
+on:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+    inputs:
+      source_pr_number:
+        description: PR number to attach preview metadata to
+        required: false
+        type: string
+      branch:
+        description: Branch to deploy (defaults to develop)
+        required: false
+        default: "develop"
+        type: string
+
+concurrency:
+  group: shipbrain-preview
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    name: Deploy to Cloudflare Pages Preview
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: |
+          echo "::group::Installing dependencies"
+          npm ci
+          echo "::endgroup::"
+
+      - name: Build application
+        run: |
+          echo "::group::Running build"
+          npm run build
+          echo "::endgroup::"
+          echo "Build completed successfully"
+
+      - name: Install Wrangler
+        run: npm install -g wrangler
+
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "::group::Deploying to Cloudflare Pages"
+          DEPLOY_OUTPUT=$(mktemp)
+          wrangler pages deploy dist \
+            --project-name="${{ secrets.CF_PROJECT_NAME }}" \
+            --branch="${{ inputs.branch || 'develop' }}" \
+            --commit-hash="$GITHUB_SHA" | tee "$DEPLOY_OUTPUT"
+          echo "::endgroup::"
+
+          # Extract deployment URL from output
+          DEPLOY_URL=$(grep -oE 'https://[a-zA-Z0-9._-]+\.pages\.dev' "$DEPLOY_OUTPUT" | tail -1)
+          echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+          echo ""
+          echo "=========================================="
+          echo "Preview deployed: $DEPLOY_URL"
+          echo "=========================================="
+
+      - name: Notify ShipBrain
+        if: always()
+        continue-on-error: true
+        env:
+          SHIPBRAIN_API_URL: ${{ secrets.SHIPBRAIN_API_URL }}
+          SHIPBRAIN_API_KEY: ${{ secrets.SHIPBRAIN_API_KEY }}
+        run: |
+          if [ -z "$SHIPBRAIN_API_URL" ] || [ -z "$SHIPBRAIN_API_KEY" ]; then
+            echo "ShipBrain secrets missing; notification skipped."
+            exit 0
+          fi
+          curl --fail-with-body -sS -X POST "$SHIPBRAIN_API_URL/api/deployments/preview" \
+            -H "Authorization: Bearer $SHIPBRAIN_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"repo\": \"$GITHUB_REPOSITORY\",
+              \"sha\": \"$GITHUB_SHA\",
+              \"branch\": \"${{ inputs.branch || 'develop' }}\",
+              \"pr_number\": \"${{ inputs.source_pr_number }}\",
+              \"environment\": \"preview\",
+              \"status\": \"${{ job.status }}\",
+              \"preview_url\": \"${{ steps.deploy.outputs.url }}\",
+              \"run_url\": \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"
+            }"

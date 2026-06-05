@@ -1,0 +1,50 @@
+name: ShipBrain CI
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+    inputs:
+      force_fail:
+        description: Trigger a deliberate failure for testing
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: shipbrain-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Print context
+        run: |
+          echo "Branch : $GITHUB_REF_NAME"
+          echo "SHA    : $GITHUB_SHA"
+          echo "Event  : $GITHUB_EVENT_NAME"
+          echo "PR     : ${{ github.event.pull_request.number || 'n/a' }}"
+      - name: Force-fail escape hatch
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_fail }}" = "true" ]; then
+            echo "Force-fail requested for testing"
+            exit 1
+          fi
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test --if-present
